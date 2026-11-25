@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Predicate;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
 
 // ---------------------------
 // Common
@@ -16,6 +18,8 @@ import java.util.function.Predicate;
 enum TokenKind {
   PLUS,
   MINUS,
+  STAR,
+  SLASH,
   LPAREN,
   RPAREN,
   INT,
@@ -58,6 +62,8 @@ class LexerLispy {
         case ')' -> new Token(RPAREN, ")");
         case '+' -> new Token(PLUS, "+");
         case '-' -> new Token(MINUS, "-");
+        case '*' -> new Token(STAR, "*");
+        case '/' -> new Token(SLASH, "/");
         default -> throw new RuntimeException("unexpected char: " + c);
       };
     }
@@ -111,7 +117,7 @@ class RdParserLispy {
   List<Token> tokens;
   int current;
 
-  public Expr parseLint(List<Token> input) {
+  public Expr parse(List<Token> input) {
     tokens = input;
     current = 0;
 
@@ -127,6 +133,8 @@ class RdParserLispy {
     if (check(LPAREN)) {
       if (peek(1).kind() == PLUS) return parseAdd();
       if (peek(1).kind() == MINUS) {} // TODO
+      if (peek(1).kind() == STAR) return parseMul();
+      if (peek(1).kind() == SLASH) {} // TODO
     }
 
     throw new RuntimeException("unexpected token: " + peek());
@@ -151,6 +159,21 @@ class RdParserLispy {
     advance(); // match(TokenKind.RPAREN);
 
     return ops.stream().reduce(AddExpr::new).orElseThrow();
+  }
+
+  // '(' '*' eform eform+ ')'
+  private Expr parseMul() {
+    match(LPAREN);
+    match(STAR);
+
+    List<Expr> ops = new ArrayList<>();
+    ops.add(parseEform()); // first
+    ops.add(parseEform()); // second
+    while (!check(RPAREN)) ops.add(parseEform());
+
+    match(RPAREN);
+
+    return ops.stream().reduce(MulExpr::new).orElseThrow();
   }
 
   // internal plumbing
@@ -193,6 +216,9 @@ record IntLiteral(int val) implements Expr {}
 record AddExpr(Expr lhs, Expr rhs) implements Expr {}
 record SubExpr(Expr lhs, Expr rhs) implements Expr {}
 
+record MulExpr(Expr lhs, Expr rhs) implements Expr {}
+record DivExpr(Expr lhs, Expr rhs) implements Expr {}
+
 // === Runtime Values ===
 
 interface Value {}
@@ -224,27 +250,105 @@ class InterpreterLint {
 }
 
 // ---------------------------
+// L-Expr
+// ---------------------------
+
+class InterpreterLexpr extends InterpreterLint {
+  @Override
+  public Value eval(Expr expr) {
+    return switch (expr) {
+      case MulExpr(Expr lhs, Expr rhs) -> {
+        int a = asInt(eval(lhs));
+        int b = asInt(eval(rhs));
+        yield new IntVal(a * b);
+      }
+      // TODO DivExpr
+
+      default -> super.eval(expr);
+    };
+  }
+}
+
+class LispyLexprAstBuilder extends LispyBaseVisitor<Object> {
+  public Expr visitLexpr(LispyParser.LexprContext ctx) {
+    return asExpr(visit(ctx.eform()));
+  }
+
+  @Override
+  public Expr visitMulExpr(LispyParser.MulExprContext ctx) {
+    return ctx.eform().stream()
+        .map(this::visit)
+        .map(this::asExpr)
+        .reduce(MulExpr::new)
+        .orElseThrow();
+  }
+
+  @Override
+  public Expr visitAddExpr(LispyParser.AddExprContext ctx) {
+    return ctx.eform().stream()
+        .map(this::visit)
+        .map(this::asExpr)
+        .reduce(AddExpr::new)
+        .orElseThrow();
+  }
+
+  @Override
+  public Expr visitNumberExpr(LispyParser.NumberExprContext ctx) {
+    return new IntLiteral(Integer.parseInt(ctx.INT().getText()));
+  }
+
+  private Expr asExpr(Object o) {
+    if (o instanceof Expr v) return v;
+    throw new RuntimeException("expected expr, got " + o);
+  }
+}
+
+// ---------------------------
 // Starter
 // ---------------------------
 
 public class Demo {
   static void main() {
-    String source = "( + (+ 4 2) (+ 1 3))";
+    String source = "( + (* 4 2) (* 1 3))";
 
-    LexerLispy lexer = new LexerLispy();
-    List<Token> tokens = lexer.scan(source);
-
-    RdParserLispy parser = new RdParserLispy();
-    Expr ast = parser.parseLint(tokens);
+    Expr ast1 = manualParsing(source);
+    Expr ast2 = antlrParsing(source);
 
     //     Expr ast =
     //            new AddExpr(
     //                new AddExpr(new IntLiteral(4), new IntLiteral(2)),
     //                new AddExpr(new IntLiteral(1), new IntLiteral(3)));
 
-    var interpreter = new InterpreterLint();
-    Value val = interpreter.eval(ast);
+    var interpreter = new InterpreterLexpr();
 
-    IO.println(val);
+    Value val1 = interpreter.eval(ast1);
+    IO.println(val1);
+
+    Value val2 = interpreter.eval(ast2);
+    IO.println(val2);
+  }
+
+  static Expr manualParsing(String source) {
+    LexerLispy lexer = new LexerLispy();
+    List<Token> tokens = lexer.scan(source);
+
+    RdParserLispy parser = new RdParserLispy();
+    Expr ast = parser.parse(tokens);
+
+    return ast;
+  }
+
+  static Expr antlrParsing(String source) {
+    var input = CharStreams.fromString(source);
+    var lexer = new LispyLexer(input);
+    var tokens = new CommonTokenStream(lexer);
+
+    var parser = new LispyParser(tokens);
+    var parsetree = parser.lexpr();
+
+    var builder = new LispyLexprAstBuilder();
+    var ast = builder.visitLexpr(parsetree);
+
+    return ast;
   }
 }
